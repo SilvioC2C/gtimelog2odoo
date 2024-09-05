@@ -79,6 +79,7 @@ class Utils:
         confirm = input('Confirm? (y/N) ')
         return confirm.lower() in ('y', 'yes', 'sure')
 
+    @staticmethod
     def ask_submit_timesheet():
         print()
         confirm = input('Submit timesheet? (Y/n)')
@@ -96,6 +97,7 @@ class Utils:
             user_input = input(input_message)
         return reviewers[user_input]
 
+    @staticmethod
     def request_comment():
         print()
         return input('Enter any comment needed for timesheet submission:')
