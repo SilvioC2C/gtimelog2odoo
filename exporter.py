@@ -32,6 +32,11 @@ utcnow = datetime.now(tz)
 tz_offset = utcnow.utcoffset().total_seconds()
 
 
+def _str_is_true(s: str) -> bool:
+    s = s or ""
+    return (s and s.strip().lower()) in ('y', 'yes', 't', 'true', '1')
+
+
 class Utils:
 
     @staticmethod
@@ -118,7 +123,7 @@ class Utils:
             'jira_account_email',
         ]
 
-        if not (args.no_attendance or result.get('no_attendance')):
+        if not (args.no_attendance or _str_is_true(result.get('no_attendance'))):
             mandatory_fields.extend([
                 'odoo_url',
                 'odoo_db',
@@ -210,6 +215,9 @@ if __name__ == '__main__':
                         default=Utils.current_year(), type=int)
     parser.add_argument('--no-interactive', action='store_true')
     parser.add_argument('--no-attendance', action='store_true')
+    parser.add_argument('--force-export', action='store_true')
+    parser.add_argument('--force-submit', action='store_true')
+    parser.add_argument('--skip-submit', action='store_true')
     parser.add_argument('--select-reviewer', default=False, action='store_true')
     parser.add_argument('-r', '--repair-estimate',
                         default=False,
@@ -220,16 +228,37 @@ if __name__ == '__main__':
 
     config = Utils.parse_config(args)
 
-    no_attendance = args.no_attendance or config.get('no_attendance')
+    no_attendance = args.no_attendance or _str_is_true(config.get('no_attendance'))
+    force_export = args.force_export or _str_is_true(config.get('force_export'))
+    force_submit = args.force_submit or _str_is_true(config.get('force_submit'))
+    skip_submit = args.skip_submit or _str_is_true(config.get('skip_submit'))
     repair_estimate = args.repair_estimate
+
+    flags = {}
 
     if no_attendance:
         odoo_conf = {}
-        print()
-        print('`--no-attendance` flag is ON -> Skipping Odoo attendances')
-        print()
+        flags['--no-attendance'] = 'Skipping Odoo attendances'
     else:
         odoo_conf = get_odoo_conf(config)
+
+    if force_export:
+        flags['--force-export'] = 'Exporting TS without user confirmation'
+
+    if force_submit and not skip_submit:
+        flags['--force-submit'] = 'Submitting TS without user confirmation'
+    elif not force_submit and skip_submit:
+        flags['--skip-submit'] = 'Not submitting any TS'
+    elif force_submit and skip_submit:
+        raise Exception("`--force-submit` and `--skip-submit` flags cannot both be ON")
+
+    if flags:
+        max_flag_length = max(len(f) for f in flags)
+        print("")
+        print("Active flags:")
+        for flag, descr in flags.items():
+            print(f"    {flag + (' ' * (max_flag_length - len(flag)))} : {descr}")
+        print("")
 
     jira_api_token = env.get('JIRA_API_TOKEN')
     if not jira_api_token:
@@ -283,7 +312,10 @@ if __name__ == '__main__':
 
     confirmed = False
     if not nothing_to_do:
-        confirmed = Utils.ask_confirmation()
+        if force_export:
+            confirmed = True
+        else:
+            confirmed = Utils.ask_confirmation()
 
     if args.no_interactive or confirmed:
         for log in to_create:
@@ -310,7 +342,10 @@ if __name__ == '__main__':
     ts_state = jira.get_timesheet_state(config['date_window'])
     submit = False
     if ts_state == "OPEN":
-        submit = Utils.ask_submit_timesheet()
+        if force_submit:
+            submit = True
+        elif not skip_submit:
+            submit = Utils.ask_submit_timesheet()
     if submit:
         cfg_reviewer_key = "tempo_reviewer_id"
         select_reviewer = args.select_reviewer
