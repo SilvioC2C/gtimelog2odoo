@@ -33,6 +33,7 @@ tz_offset = utcnow.utcoffset().total_seconds()
 
 
 class Utils:
+    _true_strings: tuple[str] = ('y', 'yes', 't', 'true',  'sure', '1')
 
     @staticmethod
     def current_weeknumber():
@@ -68,16 +69,19 @@ class Utils:
                                          seconds=59)
         return weekstart, weekstop
 
-    @staticmethod
-    def ask_confirmation():
-        print()
-        confirm = input('Confirm? (y/N) ')
-        return confirm.lower() in ('y', 'yes', 'sure')
+    @classmethod
+    def str2bool(cls, s: str) -> bool:
+        return (s and s.strip().lower()) in cls._true_strings
 
-    def ask_submit_timesheet():
+    @classmethod
+    def ask_confirmation(cls):
         print()
-        confirm = input('Submit timesheet? (Y/n)')
-        return confirm.lower() in ('y', 'yes', 'sure', '')
+        return cls.str2bool(input('Confirm? (y/N)'))
+
+    @classmethod
+    def ask_submit_timesheet(cls):
+        print()
+        return cls.str2bool(input('Submit timesheet? (Y/n)'))
 
     @staticmethod
     def select_reviewer(reviewers):
@@ -91,12 +95,13 @@ class Utils:
             user_input = input(input_message)
         return reviewers[user_input]
 
+    @staticmethod
     def request_comment():
         print()
         return input('Enter any comment needed for timesheet submission:')
 
-    @staticmethod
-    def parse_config(args):
+    @classmethod
+    def parse_config(cls, args):
         config_file = pathlib.Path(args.config).expanduser().resolve()
         if not config_file.exists():
             raise Exception(
@@ -118,7 +123,7 @@ class Utils:
             'jira_account_email',
         ]
 
-        if not (args.no_attendance or result.get('no_attendance')):
+        if not (args.no_attendance or cls.str2bool(result.get('no_attendance'))):
             mandatory_fields.extend([
                 'odoo_url',
                 'odoo_db',
@@ -129,9 +134,9 @@ class Utils:
                 'Not all mandatory fields are present '
                 'in %s config file.' % config_file)
 
-        week, year = Utils.parse_week(args)
+        week, year = cls.parse_week(args)
         result['date_window'] = DateWindow(
-            *Utils.date_range_for_week(week, year)
+            *cls.date_range_for_week(week, year)
         )
         result['tz_offset'] = tz_offset
 
@@ -210,7 +215,10 @@ if __name__ == '__main__':
                         default=Utils.current_year(), type=int)
     parser.add_argument('--no-interactive', action='store_true')
     parser.add_argument('--no-attendance', action='store_true')
-    parser.add_argument('--submit', action='store_true')
+    parser.add_argument('--force-export', action='store_true')
+    parser.add_argument('--force-submit', action='store_true')
+    parser.add_argument('--skip-submit', action='store_true')
+    parser.add_argument('--comment-submit', default='')
     parser.add_argument('--select-reviewer', default=False, action='store_true')
     parser.add_argument('-r', '--repair-estimate',
                         default=False,
@@ -221,17 +229,46 @@ if __name__ == '__main__':
 
     config = Utils.parse_config(args)
 
-    no_attendance = args.no_attendance or config.get('no_attendance')
-    do_submit = args.submit
+    str2bool = Utils.str2bool
+
+    no_attendance = args.no_attendance or str2bool(config.get('no_attendance'))
+    force_export = args.force_export or str2bool(config.get('force_export'))
     repair_estimate = args.repair_estimate
 
+    # Force-submit/skip-submit:
+    # - priority to CLI args over config file, but they must be mutually exclusive
+    # - if one of them is activated via CLI, the other one is automatically inactive,
+    #   even if activated by config file
+    args_force, args_skip = args.force_submit, args.skip_submit
+    conf_force, conf_skip = str2bool(config.get('force_submit')), str2bool(config.get('skip_submit'))
+    if args_force and args_skip:
+        raise Exception("`--force-submit` and `--skip-submit` flags cannot be both active")
+    elif args_force or args_skip:
+        force_submit, skip_submit = args_force, args_skip
+    elif conf_force and conf_skip:
+        raise Exception("Config `force_submit` and `skip_submit` settings cannot be both active")
+    else:
+        force_submit, skip_submit = conf_force, conf_skip
+
+    flags = {}
     if no_attendance:
         odoo_conf = {}
-        print()
-        print('`--no-attendance` flag is ON -> Skipping Odoo attendances')
-        print()
+        flags['--no-attendance'] = 'Skipping Odoo attendances'
     else:
         odoo_conf = get_odoo_conf(config)
+    if force_export:
+        flags['--force-export'] = 'Exporting TS without user confirmation'
+    if force_submit:
+        flags['--force-submit'] = 'Submitting TS without user confirmation'
+    elif skip_submit:
+        flags['--skip-submit'] = 'Not submitting any TS'
+    if flags:
+        max_flag_length = max(len(f) for f in flags)
+        print("")
+        print("Active flags:")
+        for flag, descr in flags.items():
+            print(f"    {flag + (' ' * (max_flag_length - len(flag)))} : {descr}")
+        print("")
 
     jira_api_token = env.get('JIRA_API_TOKEN')
     if not jira_api_token:
@@ -285,8 +322,10 @@ if __name__ == '__main__':
 
     confirmed = False
     if not nothing_to_do:
-        confirmed = Utils.ask_confirmation()
-
+        if force_export:
+            confirmed = True
+        else:
+            confirmed = Utils.ask_confirmation()
     if args.no_interactive or confirmed:
         for log in to_create:
             jira.create_worklog(log)
@@ -311,8 +350,11 @@ if __name__ == '__main__':
 
     ts_state = jira.get_timesheet_state(config['date_window'])
     submit = False
-    if ts_state == "OPEN" and do_submit:
-        submit = Utils.ask_submit_timesheet()
+    if ts_state == "OPEN":
+        if force_submit:
+            submit = True
+        elif not skip_submit:
+            submit = Utils.ask_submit_timesheet()
     if submit:
         cfg_reviewer_key = "tempo_reviewer_id"
         select_reviewer = args.select_reviewer
@@ -324,7 +366,7 @@ if __name__ == '__main__':
             print()
             print("Please add following line to your gtimelogrc (in gtimelog_exporter section) to avoid having to select a reviewer the next time:\n")
             print(f"{cfg_reviewer_key} = {reviewer}")
-        comment = Utils.request_comment()
+        comment = args.comment_submit or Utils.request_comment()
         res = jira.submit_timesheet(config['date_window'], reviewer, comment=comment)
         if res:
             print("Your Timesheet was submitted successfully")
